@@ -385,6 +385,7 @@ export async function cancelTurn(
   finishActiveTurn(live, [
     { type: "message.completed" },
     { type: "reasoning.completed" },
+    ...(flavor.id === "pi" ? [{ type: "turn.activity" as const, active: false }] : []),
   ]);
 }
 
@@ -537,6 +538,9 @@ async function startLive(
       liveByThread.delete(input.sessionId);
       const current = liveRef.current;
       if (!current?.muteUpdates) {
+        if (flavor.id === "pi") {
+          current?.onEvent({ type: "turn.activity", active: false });
+        }
         (current?.onEvent ?? input.onEvent)({ type: "session.ended", code });
       }
       if (current) {
@@ -651,11 +655,14 @@ async function runTurn(
     });
     throw error;
   } finally {
-    live.activeTurn = false;
-    live.promptId = null;
     live.rpc.cancelRequest(promptId);
-    live.turnDone = null;
-    live.turnFailed = null;
+    // A new extension-triggered run can already own the live session.
+    if (live.promptId === promptId) {
+      live.activeTurn = false;
+      live.promptId = null;
+      live.turnDone = null;
+      live.turnFailed = null;
+    }
   }
 }
 
@@ -852,6 +859,20 @@ function handleFrame(
     }
     if (type === "agent_end" && rec.isTerminal === false) return;
   }
+  if (flavor.id === "pi" && type === "agent_start") {
+    // Extensions can start a run after the submitted prompt has settled.
+    // Also invalidate a stats request still settling the previous run.
+    live.settleToken += 1;
+    live.settling = false;
+    if (!live.activeTurn) {
+      live.promptId = null;
+      live.activeTurn = true;
+      live.turnError = null;
+      live.toolsByIndex.clear();
+      live.toolsById.clear();
+    }
+    live.onEvent({ type: "turn.activity", active: true });
+  }
   if (type === "compaction_start") live.compacting = true;
   if (type === "compaction_end") live.compacting = false;
   if (type === "auto_retry_start") live.retrying = true;
@@ -975,15 +996,20 @@ function handleFrame(
 
   if (isAgentSettled(rec)) {
     flushTurnError(flavor, live);
-    void settleTurn(live);
+    void settleTurn(live, flavor);
     return;
   }
   const willRetry = agentEndWillRetry(rec);
   // The retry carries the real answer, so the attempt it replaces stays quiet.
   if (willRetry === true) live.turnError = null;
-  if (willRetry === false && !live.compacting && !live.retrying) {
+  // Pi's agent_end is a low-level boundary; queued work can still follow.
+  // Its terminal event is agent_settled. OMP retains its agent_end contract.
+  if (
+    flavor.id === "omp" && willRetry === false &&
+    !live.compacting && !live.retrying
+  ) {
     flushTurnError(flavor, live);
-    void settleTurn(live);
+    void settleTurn(live, flavor);
   }
 }
 
@@ -997,7 +1023,7 @@ function flushTurnError(flavor: PiFlavor, live: Live): void {
   });
 }
 
-async function settleTurn(live: Live): Promise<void> {
+async function settleTurn(live: Live, flavor: PiFlavor): Promise<void> {
   if (live.settling || live.cancelled || live.muteUpdates) return;
   if (!live.activeTurn && !live.turnDone) return;
   live.settling = true;
@@ -1018,6 +1044,7 @@ async function settleTurn(live: Live): Promise<void> {
     finishActiveTurn(live, [
       { type: "message.completed" },
       { type: "reasoning.completed" },
+      ...(flavor.id === "pi" ? [{ type: "turn.activity" as const, active: false }] : []),
     ]);
   }
   if (live.settleToken === token) live.settling = false;
@@ -1303,7 +1330,9 @@ function finishActiveTurn(live: Live, extraEvents: HarnessEvent[] = []): void {
     done();
     return;
   }
-  if (!failed) live.turnEndPending = true;
+  // An autonomous run has no submit promise. Its end must not settle the
+  // next user prompt before that prompt's own events arrive.
+  if (!failed && live.promptId) live.turnEndPending = true;
 }
 
 function settlePendingTurn(live: Live): void {

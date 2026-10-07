@@ -7926,6 +7926,8 @@ function Workspace({
           setSessions((prev) =>
             prev.map((s) => {
               if (s.id !== sessionId) return s;
+              // A provider can wake itself while the previous submit is flushing.
+              if (s.providerActive && !providerFailureSeen) return s;
               const stopped = stopStreaming(s);
               const providerFailed =
                 providerFailureSeen ||
@@ -7966,7 +7968,7 @@ function Workspace({
             );
             const visible = sessionId === activeSessionIdRef.current;
             // A habit's hidden run speaks through its Mono's chat instead.
-            if (finished && !isHabitRun(sessionId))
+            if (finished && !finished.busy && !isHabitRun(sessionId))
               void announceSessionFinished(finished, visible);
           }, 0);
           notifyReviewChanged(sessionId);
