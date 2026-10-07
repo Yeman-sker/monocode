@@ -27,6 +27,7 @@ import {
   type WorkspaceTab,
 } from "../../features/workspace/model/layout";
 import { useIdleSessionDetach } from "./useIdleSessionDetach";
+import { applyHarnessEvent } from "../../integrations/harness/core/apply";
 import {
   createMono,
   saveMonoSessionId,
@@ -492,4 +493,27 @@ describe("orchestration worker detachment", () => {
     expect(workspace.persistSession).not.toHaveBeenCalled();
     expect(mocks.forgetHarnessSession).not.toHaveBeenCalled();
   });
+});
+
+
+it("retains a Pi session woken by an extension until its run settles", async () => {
+  const active = applyHarnessEvent(chat("pi-wake", { harness: "pi" }), {
+    type: "turn.activity", active: true,
+  });
+  const workspace = mountWorkspace({
+    sessions: [active, chat("other")],
+    tabs: [newTab("other")],
+    orchestrationRuns: [], liveAgentsEnabled: false,
+    busySessionIds: new Set(), activeSessionId: "other",
+  });
+  await advance();
+  expect(mocks.forgetHarnessSession).not.toHaveBeenCalled();
+  expect(workspace.snapshot().sessions).toContainEqual(active);
+  workspace.update({ sessions: workspace.snapshot().sessions.map(session =>
+    session.id === active.id
+      ? applyHarnessEvent(session, { type: "turn.activity", active: false })
+      : session,
+  ) });
+  await advance();
+  expect(mocks.forgetHarnessSession).toHaveBeenCalledWith("pi", active.id);
 });
