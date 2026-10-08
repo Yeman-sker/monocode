@@ -23,8 +23,23 @@ vi.mock("../../sessions/hooks/useFileDrop", () => ({
   useFileDrop: () => false,
 }));
 vi.mock("../../sessions/ui/AgentTranscript", () => ({
-  AgentTranscript: ({ blocks }: { blocks: { text: string }[] }) =>
-    createElement("div", null, blocks.map((b) => b.text).join(" ")),
+  AgentTranscript: ({
+    blocks,
+    onOpenArtifact,
+  }: {
+    blocks: { text: string }[];
+    onOpenArtifact: (id: string) => void;
+  }) =>
+    createElement(
+      "div",
+      null,
+      blocks.map((b) => b.text).join(" "),
+      createElement(
+        "button",
+        { "data-open-doc": "", onClick: () => onOpenArtifact("doc-1") },
+        "Open document",
+      ),
+    ),
 }));
 vi.mock("../hooks/useMonoTranscript", () => ({
   useMonoTranscript: (session: { blocks: unknown[] }) => ({
@@ -276,4 +291,39 @@ it("ignores a stale initial snapshot after a newer update arrives", async () => 
   await act(async () => initial(snapshot(0)));
   expect(container.querySelector("h1")!.textContent).toBe("Scout");
   expect(container.textContent).toContain("Scout's conversation");
+});
+
+it("reads a Mono's document in a sheet over the chat and slides it away", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  native.invoke.mockImplementation(async (command) => {
+    if (command === "mono_chat_state") return snapshot(0);
+    if (command === "artifacts_get")
+      return {
+        id: "doc-1",
+        kind: "document",
+        title: "Menu plan",
+        body: "Soup first.",
+        createdAt: 1,
+        updatedAt: 1,
+      };
+  });
+  await render();
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("[data-open-doc]")!.click(),
+  );
+  const sheet = container.querySelector('[data-artifact-sheet="doc-1"]');
+  expect(sheet?.textContent).toContain("Menu plan");
+  expect(sheet?.textContent).toContain("Soup first.");
+  // Reading in place never asks the main window to take over.
+  expect(native.invoke).not.toHaveBeenCalledWith(
+    "mono_chat_action",
+    expect.anything(),
+  );
+  act(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  });
+  expect(container.querySelector("[data-artifact-sheet]")).not.toBeNull();
+  act(() => vi.runAllTimers());
+  expect(container.querySelector("[data-artifact-sheet]")).toBeNull();
+  vi.useRealTimers();
 });

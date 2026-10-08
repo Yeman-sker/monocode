@@ -2,7 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { ExternalLink, Plus, Square, X } from "../../../shared/ui/icons";
+import { Copy, ExternalLink, Plus, Square, X } from "../../../shared/ui/icons";
+import { copyMessage } from "../../../platform/tauri/clipboard";
+import {
+  ArtifactContent,
+  useArtifact,
+} from "../../artifacts/ui/ArtifactContent";
+import { artifactLabel } from "../../artifacts/artifacts";
 import { PixelMascot } from "../../projects/ui/PixelMascot";
 import { AgentTranscript } from "../../sessions/ui/AgentTranscript";
 import { QuestionForm } from "../../sessions/ui/QuestionForm";
@@ -41,12 +47,13 @@ const SURFACE =
  * everything around it instead: the rail and the gaps, never the chat.
  */
 const CARD =
-  "body-glass my-1.5 mr-1.5 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] shadow-[0_0_0_100vmax_rgb(0_0_0/0.28)] [html.theme-light_&]:shadow-[0_0_0_100vmax_rgb(0_0_0/0.05)]";
+  "body-glass relative my-1.5 mr-1.5 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] shadow-[0_0_0_100vmax_rgb(0_0_0/0.28)] [html.theme-light_&]:shadow-[0_0_0_100vmax_rgb(0_0_0/0.05)]";
 
 export function FloatingMonoChat({ onShown }: { onShown: () => void }) {
   const [view, setView] = useState(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState(0);
+  const [artifactId, setArtifactId] = useState<string | null>(null);
   const selectedId = useRef(view.monoId);
   selectedId.current = view.monoId;
   useEffect(() => {
@@ -59,6 +66,7 @@ export function FloatingMonoChat({ onShown }: { onShown: () => void }) {
       if (next.monoId !== selected) {
         selected = next.monoId;
         setError(null);
+        setArtifactId(null);
         setFocus((n) => n + 1);
       }
       setView(next);
@@ -258,9 +266,21 @@ export function FloatingMonoChat({ onShown }: { onShown: () => void }) {
               session={view.session!}
               focus={focus}
               action={action}
+              onOpenArtifact={setArtifactId}
             />
           </>
         )}
+        {artifactId && !loading ? (
+          <ArtifactSheet
+            key={artifactId}
+            id={artifactId}
+            action={action}
+            onClose={() => {
+              setArtifactId(null);
+              setFocus((n) => n + 1);
+            }}
+          />
+        ) : null}
       </div>
     </div>
   );
@@ -314,7 +334,7 @@ function MonoRail({
               aria-current={selected ? "true" : undefined}
               onClick={() => onSwitch(mono.id)}
               className={`grid size-8 place-items-center rounded-lg transition-opacity ${
-                selected ? "" : "opacity-70 hover:opacity-100"
+                selected ? "" : "opacity-40 hover:opacity-100 focus-visible:opacity-100"
               }`}
             >
               <PixelMascot
@@ -348,11 +368,13 @@ function FloatingConversation({
   session,
   focus,
   action,
+  onOpenArtifact,
 }: {
   mono: FloatingMonoEntry;
   session: Session;
   focus: number;
   action: (action: FloatingMonoAction) => Promise<boolean>;
+  onOpenArtifact: (id: string) => void;
 }) {
   const transcript = useMonoTranscript(session, true);
   return (
@@ -416,7 +438,7 @@ function FloatingConversation({
             void action({ kind: "approval", requestId, decision })
           }
           onOpenFile={(path) => void action({ kind: "openFile", path })}
-          onOpenArtifact={(id) => void action({ kind: "openArtifact", id })}
+          onOpenArtifact={onOpenArtifact}
           onOpenDiff={() => void action({ kind: "reveal" })}
           onShowWork={() => void action({ kind: "reveal" })}
           onShowSessions={() => void action({ kind: "reveal" })}
@@ -474,6 +496,148 @@ function FloatingConversation({
           }}
         />
       </div>
+    </div>
+  );
+}
+
+const SHEET_MS = 280;
+
+/**
+ * A document read in place: a sheet that rises over the conversation, since a
+ * side panel would crowd this small window. The main app still has the full
+ * reader, one click away.
+ */
+function ArtifactSheet({
+  id,
+  action,
+  onClose,
+}: {
+  id: string;
+  action: (action: FloatingMonoAction) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const { artifact, loaded, error, setError } = useArtifact(id);
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const closing = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const close = useCallback(() => {
+    if (closing.current) return;
+    setOpen(false);
+    closing.current = setTimeout(onClose, SHEET_MS);
+  }, [onClose]);
+  useEffect(() => {
+    // Mount below the frame, then rise, so the transition has a start.
+    const frame = requestAnimationFrame(() => setOpen(true));
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(closing.current);
+    };
+  }, []);
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    };
+    // Capture, so Escape closes the sheet before it can stop a reply.
+    window.addEventListener("keydown", escape, true);
+    return () => window.removeEventListener("keydown", escape, true);
+  }, [close]);
+
+  const label = artifact ? artifactLabel(artifact.kind) : "Document";
+  return (
+    <div
+      data-artifact-sheet={id}
+      className="absolute inset-0 z-20 overflow-hidden"
+    >
+      <div
+        aria-hidden
+        onClick={close}
+        className={`absolute inset-0 bg-black/15 transition-opacity duration-300 motion-reduce:transition-none ${
+          open ? "opacity-100" : "opacity-0"
+        }`}
+      />
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label={artifact?.title ?? label}
+        className={`absolute inset-x-0 top-10 bottom-0 flex flex-col rounded-t-[10px] border-t border-content/10 bg-content/5 shadow-[0_-12px_32px_rgb(0_0_0/0.18)] backdrop-blur-3xl transition-transform duration-300 ease-out motion-reduce:transition-none ${
+          open ? "translate-y-0" : "translate-y-full"
+        }`}
+      >
+        <div aria-hidden className="flex shrink-0 justify-center pt-2">
+          <span className="h-1 w-9 rounded-full bg-content/20" />
+        </div>
+        <header className="flex shrink-0 items-center gap-1 px-3 pt-1 pb-2">
+          <span className="min-w-0 flex-1 truncate px-1 text-[12px] text-content/50">
+            {label}
+          </span>
+          {artifact ? (
+            <button
+              type="button"
+              aria-label={copied ? "Copied" : `Copy ${label.toLowerCase()}`}
+              title={copied ? "Copied" : `Copy ${label.toLowerCase()}`}
+              className={BUTTON}
+              onClick={() =>
+                void copyMessage(artifact.body).then(
+                  () => setCopied(true),
+                  () => setError("Could not copy this document."),
+                )
+              }
+            >
+              <Copy className="size-3.5" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="Open in MonoCode"
+            title="Open in MonoCode"
+            className={BUTTON}
+            onClick={() => void action({ kind: "openArtifact", id })}
+          >
+            <ExternalLink className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label="Close document"
+            title="Close (Escape)"
+            className={BUTTON}
+            onClick={close}
+          >
+            <X className="size-4" />
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-2 pb-8">
+          {!loaded ? (
+            <p role="status" className="text-[13px] text-content/50">
+              Loading document…
+            </p>
+          ) : !artifact ? (
+            <p role="alert" className="text-[13px] text-content/60">
+              {error ?? "This document is no longer available."}
+            </p>
+          ) : (
+            <article data-artifact-reader={artifact.id}>
+              <h1 className="mb-1 text-[20px] leading-snug font-medium text-content">
+                {artifact.title}
+              </h1>
+              <p className="mb-5 text-[11px] text-content/45">
+                Updated {new Date(artifact.updatedAt).toLocaleString()}
+              </p>
+              <ArtifactContent
+                artifact={artifact}
+                onOpenFile={(path) => void action({ kind: "openFile", path })}
+              />
+              {error ? (
+                <p role="alert" className="mt-3 text-[12px] text-content/60">
+                  {error}
+                </p>
+              ) : null}
+            </article>
+          )}
+        </div>
+      </section>
     </div>
   );
 }

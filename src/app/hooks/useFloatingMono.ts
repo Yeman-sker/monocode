@@ -1,9 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { IS_MAC } from "../../platform/tauri/platform";
 import type { Session } from "../../features/sessions/model/session";
 import { findMono } from "../../features/monos/model/mono";
+import {
+  loadMonoMenuBarIcon,
+  subscribeMonoMenuBarIcon,
+} from "../../features/settings/model/settings";
 import {
   deliverFloatingMonoRequest,
   floatingMonoRoster,
@@ -161,6 +165,19 @@ export function useFloatingMono(
   useEffect(() => {
     refresh.current();
   }, [rosterKey, enabled, hostedKey]);
+
+  // The native side remembers this too; syncing here keeps it matching the
+  // setting if the two ever drift.
+  const menuBarIcon = useSyncExternalStore(
+    subscribeMonoMenuBarIcon,
+    loadMonoMenuBarIcon,
+  );
+  useEffect(() => {
+    if (!IS_MAC || !isTauri()) return;
+    void invoke("mono_menu_bar_set_visible", { visible: menuBarIcon }).catch(
+      console.error,
+    );
+  }, [menuBarIcon]);
 
   // Follow the same React commits as the main transcript. A polling interval
   // batches streamed lines into visible jumps and delays the send entrance.

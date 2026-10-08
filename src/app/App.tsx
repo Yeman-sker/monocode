@@ -277,6 +277,7 @@ import {
   forgetHarnessSession,
   generateHarnessTitle,
   generateHarnessBranchName,
+  migrateMonoCodexSession,
   isLiveHarness,
   latestTurnNeedsHarnessLogin,
   probeHarnessAvailability,
@@ -577,11 +578,9 @@ import {
   updateHabits,
 } from "../features/monos/model/monoHabits";
 import {
-  loadMonoBaseline,
   loadMonoRotation,
   planRotation,
   rotationReason,
-  saveMonoBaseline,
   saveMonoRotation,
 } from "../features/monos/model/monoRotation";
 import {
@@ -616,6 +615,10 @@ import {
   removeArtifactCard,
   ARTIFACT_DELETED_EVENT,
 } from "../features/artifacts/artifacts";
+import {
+  MonoChangesPanel,
+  type MonoChangesRequest,
+} from "../features/monos/ui/MonoChangesPanel";
 import { ArtifactPanel } from "../features/artifacts/ui/ArtifactPanel";
 import {
   claimDueAutomations,
@@ -660,6 +663,7 @@ import {
   remoteSessionActions,
 } from "../features/connections/model/remoteSessionActions";
 import { remoteSessionState } from "../features/connections/model/remoteSessionState";
+import { findRemoteSessionTab } from "../features/connections/model/remoteSessionTabs";
 import {
   remotePath,
   remoteProjectFor,
@@ -1093,22 +1097,38 @@ function Workspace({
     setMonoDetailsOpen(false);
     setMonoActivity(null);
     setMonoSessions(null);
+    setMonoChanges(null);
     setMonoArtifact({ sessionId, id });
   }, []);
   const onCloseMonoArtifact = useCallback(() => {
     setMonoArtifact(null);
     monoArtifactOpener.current?.focus();
   }, []);
+  const [monoChanges, setMonoChanges] = useState<{
+    sessionId: string;
+    cwd: string;
+    request: MonoChangesRequest;
+  } | null>(null);
+  const monoChangesOpener = useRef<HTMLElement | null>(null);
+  const onCloseMonoChanges = useCallback(() => {
+    setMonoChanges(null);
+    monoChangesOpener.current?.focus();
+  }, []);
   useEffect(() => {
-    const listening = listen<string>(ARTIFACT_DELETED_EVENT, ({ payload: id }) => {
-      const previous = sessionsRef.current;
-      const updated = previous.map((session) => removeArtifactCard(session, id));
-      if (updated.some((session, index) => session !== previous[index])) {
-        sessionsRef.current = updated;
-        setSessions(updated);
-      }
-      setMonoArtifact((current) => (current?.id === id ? null : current));
-    });
+    const listening = listen<string>(
+      ARTIFACT_DELETED_EVENT,
+      ({ payload: id }) => {
+        const previous = sessionsRef.current;
+        const updated = previous.map((session) =>
+          removeArtifactCard(session, id),
+        );
+        if (updated.some((session, index) => session !== previous[index])) {
+          sessionsRef.current = updated;
+          setSessions(updated);
+        }
+        setMonoArtifact((current) => (current?.id === id ? null : current));
+      },
+    );
     return () => {
       void listening.then((unlisten) => unlisten());
     };
@@ -1121,6 +1141,7 @@ function Workspace({
     (sessionId: string, turnId: string, blocks: Block[]) => {
       setMonoDetailsOpen(false);
       setMonoArtifact(null);
+      setMonoChanges(null);
       setMonoSessions(null);
       setMonoActivity((previous) =>
         previous?.sessionId === sessionId && previous.turnId === turnId
@@ -1134,6 +1155,7 @@ function Workspace({
     (sessionId: string, turnId: string, blocks: Block[]) => {
       setMonoDetailsOpen(false);
       setMonoArtifact(null);
+      setMonoChanges(null);
       setMonoActivity(null);
       setMonoSessions((previous) =>
         previous?.sessionId === sessionId && previous.turnId === turnId
@@ -1153,6 +1175,7 @@ function Workspace({
     setMonoActivity(null);
     setMonoSessions(null);
     setMonoArtifact(null);
+    setMonoChanges(null);
   }, []);
   const [composerFocused, setComposerFocused] = useState(() => {
     if (windowTransfer) return true;
@@ -1673,6 +1696,58 @@ function Workspace({
       harnessEvents.cancelScheduled();
     };
   }, [resumed, readProjectReturnMemory, harnessEvents]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Retain known existing Mono threads before hiding their original entries.
+    // Sending a turn uses the same migration lock, so it can safely overlap.
+    void (async () => {
+      for (const mono of listMonos()) {
+        if (cancelled) return;
+        if (!mono.sessionId) continue;
+        try {
+          const session =
+            sessionsRef.current.find((s) => s.id === mono.sessionId) ??
+            (await getSession(mono.sessionId));
+          if (
+            !session ||
+            cancelled ||
+            sessionsRef.current.find((s) => s.id === session.id)?.busy
+          )
+            continue;
+          const cwd = sessionWorkCwd(session);
+          if (!cwd || cwd === "~") continue;
+          const threadIds = new Set<string>();
+          if (session.harness === "codex" && session.providerSessionId)
+            threadIds.add(session.providerSessionId);
+          for (const block of session.blocks) {
+            for (const thread of block.btwThreads ?? []) {
+              if (
+                (thread.harness ?? session.harness) === "codex" &&
+                thread.providerThreadId
+              )
+                threadIds.add(thread.providerThreadId);
+            }
+          }
+          for (const threadId of threadIds) {
+            if (cancelled) return;
+            await migrateMonoCodexSession({
+              sessionId: session.id,
+              threadId,
+              cwd,
+              providerAccountId: session.providerAccountId,
+            });
+          }
+        } catch (error) {
+          // Keep the original context intact; the next native operation retries.
+          console.warn("Could not migrate saved Mono Codex context", error);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [monosSnap]);
 
   useEffect(() => {
     void probeHarnessAvailability();
@@ -2602,14 +2677,12 @@ function Workspace({
       setInboxViewOpen(false);
       setNotesViewOpen(false);
       setAutomationsViewOpen(false);
-      const existing = tabsRef.current
-        .map((tab) => ({
-          tab,
-          shellId: leafIds(tab.layout).find(
-            (shellId) => remoteSessionFor(shellId) === remoteSessionId,
-          ),
-        }))
-        .find(({ shellId }) => shellId);
+      const existing = findRemoteSessionTab(
+        tabsRef.current,
+        sessionsRef.current,
+        project,
+        remoteSessionId,
+      );
       if (existing) {
         activateTab(existing.tab.id, existing.shellId);
         return;
@@ -3957,6 +4030,7 @@ function Workspace({
       session?: { sessionId: string; cwd: string },
       changeKind?: GitFileDiffKind,
       pin = false,
+      options?: { exact?: boolean },
     ) => {
       void (async () => {
         const diffCwd = session?.cwd ?? gitCwdRef.current;
@@ -3965,7 +4039,9 @@ function Workspace({
               ?.cwd
           : sidebarCwdRef.current;
         const resolved = path
-          ? ((await resolveOpenablePath(diffCwd, path)) ?? path)
+          ? options?.exact
+            ? path
+            : ((await resolveOpenablePath(diffCwd, path)) ?? path)
           : undefined;
         if (resolved) rememberOpenedFile(diffCwd, resolved);
         setTabs((prev) =>
@@ -4005,9 +4081,44 @@ function Workspace({
     [activeTabId],
   );
 
+  // A Mono view covers the workspace, so its session changes open beside the
+  // chat instead of in a project tab hidden behind it.
+  const openMonoChanges = useCallback(
+    (
+      session: { sessionId: string; cwd: string },
+      request: MonoChangesRequest,
+    ) => {
+      monoChangesOpener.current =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      setMonoDetailsOpen(false);
+      setMonoActivity(null);
+      setMonoSessions(null);
+      setMonoArtifact(null);
+      setMonoChanges({ ...session, request });
+    },
+    [],
+  );
+  const onOpenMonoDiff = useCallback(
+    (path?: string, session?: { sessionId: string; cwd: string }) => {
+      if (!session) {
+        onOpenDiff(path);
+        return;
+      }
+      openMonoChanges(session, { path, tab: "changes" });
+    },
+    [onOpenDiff, openMonoChanges],
+  );
+  const onCommitMonoChanges = useCallback(
+    (session: { sessionId: string; cwd: string }) =>
+      openMonoChanges(session, { tab: "commit" }),
+    [openMonoChanges],
+  );
+
   const onOpenWorkingTreeDiff = useCallback(
     (path: string, kind?: GitFileDiffKind, pin?: boolean) =>
-      onOpenDiff(path, undefined, kind, pin),
+      onOpenDiff(path, undefined, kind, pin, { exact: true }),
     [onOpenDiff],
   );
 
@@ -5591,6 +5702,12 @@ function Workspace({
         setComposerFocused(true);
         return;
       }
+      if (previous && !sameProjectPath(previous, normalized)) {
+        // Clear bindings left by older versions before reusing a local shell.
+        if (remoteSessionFor(sessionId)) rememberRemoteSession(sessionId);
+        if (remotePendingWorktree(sessionId))
+          rememberRemotePendingWorktree(sessionId);
+      }
       if (
         previous &&
         !sameProjectPath(previous, normalized) &&
@@ -6410,12 +6527,7 @@ function Workspace({
       setSessions((prev) =>
         prev.map((s) => {
           if (s.id !== sessionId) return s;
-          let next = withHarnessChoice(
-            s,
-            harness,
-            resolved.id,
-            modelSettings,
-          );
+          let next = withHarnessChoice(s, harness, resolved.id, modelSettings);
           if (plan.kind === "arm") {
             next = { ...next, pendingSwitch: plan.pending };
           } else if (plan.kind === "revert") {
@@ -7058,15 +7170,11 @@ function Workspace({
       }
 
       // A Mono's chat never ends, but the provider session behind it does:
-      // once it grows expensive, or after a long break, this turn starts a
-      // fresh one, briefed on where the conversation was.
+      // once it fills most of the model's context window, this turn starts
+      // a fresh one, briefed on where the conversation was.
       const monoRotationReason =
         mono && !pendingSwitch && !editedResend
-          ? rotationReason(
-              current,
-              Date.now(),
-              loadMonoBaseline(sessionId, current.harness),
-            )
+          ? rotationReason(current)
           : undefined;
       const monoRotation = monoRotationReason
         ? planRotation(
@@ -7551,15 +7659,8 @@ function Workspace({
           const routed = routePlanEvent(event);
           if (routed) enqueueHarnessEvent(sessionId, routed);
         };
-        // A fresh provider session's first context reading is what the Mono
-        // costs before any conversation; rotation measures growth from it.
-        let measureMonoBaseline = false;
         const routeTurnEvent = (event: HarnessEvent) => {
           if (turnGen.current.get(sessionId) !== gen) return;
-          if (measureMonoBaseline && event.type === "context" && event.used) {
-            measureMonoBaseline = false;
-            saveMonoBaseline(sessionId, current.harness, event.used);
-          }
           if (editedResend && !editedResend.isAccepted()) {
             pendingEditedEvents.push(event);
             return;
@@ -7632,7 +7733,13 @@ function Workspace({
                 cwd: workCwd,
                 model: current.model,
                 modelSettings: current.modelSettings,
+                providerAccountId,
                 runtimeMode: current.runtimeMode,
+                ephemeral: current.ephemeral === true,
+                codexStore: mono ? "mono" : undefined,
+                controlsAgents:
+                  operatorAccess ||
+                  orchestrator.run(sessionId)?.status === "active",
                 ...(editedProviderTurnId
                   ? { providerTurnId: editedProviderTurnId }
                   : {}),
@@ -7682,6 +7789,8 @@ function Workspace({
               modelSettings: current.modelSettings,
               providerAccountId,
               runtimeMode: current.runtimeMode,
+              ephemeral: current.ephemeral === true,
+              codexStore: mono ? "mono" : undefined,
               intent: intent === "orchestrate" ? "plan" : intent,
               // A /operator user turn enables app access for this thread;
               // orchestration leads retain their separate control access.
@@ -7709,6 +7818,14 @@ function Workspace({
             ),
           );
           if (monoRotation) {
+            if (current.harness === "codex" && current.providerSessionId) {
+              await migrateMonoCodexSession({
+                sessionId,
+                threadId: current.providerSessionId,
+                cwd: workCwd,
+                providerAccountId,
+              });
+            }
             await forgetHarnessSession(current.harness, sessionId);
             const fresh = (session: Session) =>
               session.id === sessionId
@@ -7723,7 +7840,6 @@ function Workspace({
             setSessions((prev) => prev.map(fresh));
             saveMonoRotation(sessionId, monoRotation.rotation);
           }
-          measureMonoBaseline = mono && !current.providerSessionId;
           // The agent's soul and memory live in its folder. A native session
           // is handed them once, and memory again only when it changes.
           const monoRecord = mono ? monoForSession(sessionId) : undefined;
@@ -8293,7 +8409,9 @@ function Workspace({
   );
   const queueMonoSessionCompletionRef = useRef(queueMonoSessionCompletion);
   queueMonoSessionCompletionRef.current = queueMonoSessionCompletion;
-  const monoCompletionBatches = useRef<MonoSessionCompletionBatches | null>(null);
+  const monoCompletionBatches = useRef<MonoSessionCompletionBatches | null>(
+    null,
+  );
   if (!monoCompletionBatches.current) {
     monoCompletionBatches.current = new MonoSessionCompletionBatches(
       (monoId, message, current) =>
@@ -9219,6 +9337,8 @@ function Workspace({
         providerAccountId: input.source.providerAccountId,
         model: model || undefined,
         modelSettings: input.thread.modelSettings ?? input.source.modelSettings,
+        ephemeral: false,
+        codexStore: isMonoSession(input.source.id) ? "mono" : undefined,
         threadId: input.thread.providerThreadId,
         onThreadId: (providerThreadId) => {
           if (controller.signal.aborted) return;
@@ -9751,6 +9871,12 @@ function Workspace({
                 selectedProviderAccountId(current.harness, current.cwd))
               : undefined,
             runtimeMode: current.runtimeMode,
+            ephemeral: current.ephemeral === true,
+            codexStore: isMonoSession(sessionId) ? "mono" : undefined,
+            controlsAgents:
+              isMonoSession(sessionId) ||
+              operatorEnabledInThread(current.blocks) ||
+              orchestrator.run(sessionId)?.status === "active",
             onEvent: (event) => {
               if (turnGen.current.get(sessionId) !== gen) return;
               enqueueHarnessEvent(sessionId, event);
@@ -10759,11 +10885,14 @@ function Workspace({
             monoOf: (id) => {
               const mono =
                 monoForSession(id) ?? findMono(habitRunMono(id) ?? "");
-              return mono && {
-                id: mono.id,
-                projects: mono.projects,
-                showStartedSessionsInSidebar: mono.showStartedSessionsInSidebar,
-              };
+              return (
+                mono && {
+                  id: mono.id,
+                  projects: mono.projects,
+                  showStartedSessionsInSidebar:
+                    mono.showStartedSessionsInSidebar,
+                }
+              );
             },
             habits: { load: loadHabits, update: updateHabits },
             agentFiles: (monoId) => loadMonoFiles(monoId),
@@ -11898,9 +12027,7 @@ function Workspace({
       listen("close_all_tabs", () =>
         run("close-all", actions.current.onCloseAllTabs),
       ),
-      listen("close_tab", () =>
-        run("close", actions.current.onCloseFocused),
-      ),
+      listen("close_tab", () => run("close", actions.current.onCloseFocused)),
       listen<boolean>("toggle_autosave", ({ payload }) => {
         const saved = saveAutosave(payload);
         if (saved !== payload && IS_MAC) {
@@ -12174,7 +12301,8 @@ function Workspace({
     monoDetailsOpen ||
     !!selectedMonoActivity ||
     !!selectedMonoSessions ||
-    (monoArtifact?.sessionId === monoViewSession?.id && !!monoArtifact);
+    (monoArtifact?.sessionId === monoViewSession?.id && !!monoArtifact) ||
+    (monoChanges?.sessionId === monoViewSession?.id && !!monoChanges);
   const monoDetailsPanel =
     monoViewMono && monoViewSession ? (
       <MonoDetails
@@ -12183,7 +12311,8 @@ function Workspace({
           monoDetailsOpen &&
           !selectedMonoActivity &&
           !selectedMonoSessions &&
-          monoArtifact?.sessionId !== monoViewSession.id
+          monoArtifact?.sessionId !== monoViewSession.id &&
+          monoChanges?.sessionId !== monoViewSession.id
         }
         monoId={monoViewMono.id}
         cwd={monoViewSession.cwd}
@@ -12283,6 +12412,7 @@ function Workspace({
               setMonoSessions(null);
               setMonoDetailsOpen(true);
               setMonoArtifact(null);
+              setMonoChanges(null);
             }
           : undefined
       }
@@ -12669,6 +12799,8 @@ function Workspace({
                                       composerFocusToken={composerFocusToken}
                                       onShowMonoActivity={onShowMonoActivity}
                                       onOpenArtifact={onOpenMonoArtifact}
+                                      onOpenDiff={onOpenMonoDiff}
+                                      onCommitChanges={onCommitMonoChanges}
                                       monoActivityTurnId={
                                         selectedMonoActivity?.turnId
                                       }
@@ -12724,6 +12856,21 @@ function Workspace({
                       color={monoViewMono.color}
                       onClose={onCloseMonoArtifact}
                       onOpenFile={onOpenFile}
+                      windowControls={
+                        monoCovers && !IS_MAC ? <WindowControls /> : undefined
+                      }
+                    />
+                  ) : null}
+                  {monoViewMono &&
+                  monoChanges &&
+                  monoChanges.sessionId === monoViewSession?.id ? (
+                    <MonoChangesPanel
+                      sessionId={monoChanges.sessionId}
+                      cwd={monoChanges.cwd}
+                      request={monoChanges.request}
+                      color={monoViewMono.color}
+                      textHarness={monoViewSession?.harness}
+                      onClose={onCloseMonoChanges}
                       windowControls={
                         monoCovers && !IS_MAC ? <WindowControls /> : undefined
                       }

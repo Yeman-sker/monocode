@@ -24,8 +24,8 @@ const TRAY: &str = "mono-menu-bar";
 const SELECT: &str = "mono-chat:";
 const CHANGED: &str = "mono_chat_changed";
 const REQUEST: &str = "mono_chat_request";
-/// The conversation's 390pt plus the Mono rail beside it.
-const WIDTH: f64 = 446.0;
+/// A 464pt conversation plus the 56pt Mono rail beside it.
+const WIDTH: f64 = 520.0;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -178,8 +178,8 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             let id = event.id().as_ref();
             if let Some(mono_id) = id.strip_prefix(SELECT) {
                 let _ = open(app, mono_id.to_owned());
-            } else if id == "mono-chat-show" {
-                let _ = crate::window::show_hidden_or_open_new(app);
+            } else if id == "mono-chat-composer" {
+                crate::quick_composer::open(app);
             } else if id == "mono-chat-quit" {
                 crate::window::request_quit(app);
             }
@@ -187,6 +187,40 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
     tray = tray.icon(menu_bar_icon().map_err(std::io::Error::other)?);
     let tray = tray.build(app)?;
     menu_bar::decorate(&tray)?;
+    // Read natively so a hidden icon never flashes in before a window loads.
+    if menu_bar_hidden_marker(app).is_some_and(|marker| marker.exists()) {
+        tray.set_visible(false)?;
+    }
+    Ok(())
+}
+
+fn menu_bar_hidden_marker(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("menu-bar-icon-hidden"))
+}
+
+/// Show or hide the menu bar icon, remembering the choice for next launch.
+#[tauri::command]
+pub fn mono_menu_bar_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    let marker = menu_bar_hidden_marker(&app).ok_or("No app data directory.")?;
+    if visible {
+        match std::fs::remove_file(&marker) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error.to_string())
+            }
+            _ => {}
+        }
+    } else {
+        if let Some(dir) = marker.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&marker, b"").map_err(|e| e.to_string())?;
+    }
+    if let Some(tray) = app.tray_by_id(TRAY) {
+        tray.set_visible(visible).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -258,9 +292,12 @@ fn menu(
             builder = builder.item(&item);
         }
     }
-    let show = MenuItemBuilder::with_id("mono-chat-show", "Open MonoCode").build(app)?;
-    let quit = MenuItemBuilder::with_id("mono-chat-quit", "Quit MonoCode").build(app)?;
-    builder.separator().items(&[&show, &quit]).build()
+    for action in &menu_bar::ACTIONS {
+        builder = builder
+            .separator()
+            .item(&MenuItemBuilder::with_id(action.id, action.title).build(app)?);
+    }
+    builder.build()
 }
 
 fn label(mono_id: &str) -> String {
@@ -747,7 +784,7 @@ pub fn mono_chat_reply(
         let reveal = result.is_ok()
             && matches!(
                 request.action.get("kind").and_then(Value::as_str),
-                Some("reveal" | "openFile")
+                Some("reveal" | "openFile" | "openArtifact")
             );
         inner.finish(id, window.label(), result);
         (request.mono_id, reveal)
@@ -788,6 +825,7 @@ pub async fn mono_chat_action(
             | "questionInteraction"
             | "reveal"
             | "openFile"
+            | "openArtifact"
             | "resume"
     ) {
         return Err("Unknown chat action.".into());
