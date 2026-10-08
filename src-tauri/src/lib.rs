@@ -440,6 +440,7 @@ pub fn run() {
             harness::harness_resolve_antigravity,
             harness::harness_free_port,
             harness::harness_spawn,
+            harness::harness_prepare_pi_bridge,
             harness::harness_write,
             harness::harness_kill,
             harness::harness_kill_all,

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../core/child", () => ({
+  preparePiBackgroundBridge: async () => "/fake/bridge.mjs",
   killChild: mocks.killChild,
   resolveOmpBinary: vi.fn(),
   resolvePiBinary: mocks.resolveBinary,
@@ -233,6 +234,65 @@ describe("Pi extension-triggered runs", () => {
     return { done, settled: () => settled };
   }
 
+  function background(tasks: string[]) {
+    frame({ type: "extension_ui_request", method: "setStatus", id: "bridge",
+      statusKey: "monocode.pi-background.v1", statusText: JSON.stringify({ version: 1, tasks }),
+    });
+  }
+
+  it("holds the user turn through background waiting, delivery and parent follow-up", async () => {
+    const turn = await submit();
+    expect(mocks.spawnChild).toHaveBeenCalledWith(input.sessionId, "/fake/pi",
+      expect.arrayContaining(["--extension", "/fake/bridge.mjs"]), "/repo", undefined, "pi");
+    frame({ type: "agent_start" });
+    background(["pi-subagents"]);
+    frame({ type: "agent_settled" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(turn.settled()).toBe(false);
+    expect(events).toContainEqual({ type: "background.updated", tasks: ["pi-subagents"] });
+    // The extension keeps the lease during pending notification delivery.
+    frame({ type: "agent_start" });
+    background([]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(turn.settled()).toBe(false);
+    frame({ type: "agent_settled" });
+    await turn.done;
+  });
+
+  it("retains extension work registered between parent runs and releases without a wake", async () => {
+    background(["pi-subagents"]);
+    expect(events).toContainEqual({ type: "turn.activity", active: true });
+    background([]);
+    await vi.waitFor(() => expect(events).toContainEqual({ type: "turn.activity", active: false }));
+  });
+
+  it("can prompt while waiting and settles a no-wake completion", async () => {
+    const turn = await submit();
+    frame({ type: "agent_start" });
+    background(["pi-subagents"]);
+    frame({ type: "agent_settled" });
+    await steerPiTurn({ ...input, text: "Status?", attachments: [] });
+    expect(mocks.request).toHaveBeenLastCalledWith(expect.objectContaining({ type: "prompt", message: "Status?" }));
+    background([]);
+    await turn.done;
+  });
+
+  it("ignores malformed bridge data and late updates after cancellation", async () => {
+    const turn = await submit();
+    frame({ type: "agent_start" });
+    background(["pi-subagents"]);
+    frame({ type: "extension_ui_request", method: "setStatus", id: "bad",
+      statusKey: "monocode.pi-background.v1", statusText: "{bad json",
+    });
+    frame({ type: "agent_settled" });
+    expect(turn.settled()).toBe(false);
+    await cancelPiTurn(input.sessionId);
+    await turn.done;
+    events.length = 0;
+    background(["pi-subagents"]);
+    expect(events).toEqual([]);
+  });
+
   it("waits for agent_settled rather than ending at a low-level agent_end", async () => {
     const turn = await submit();
     frame({ type: "agent_start" });
@@ -256,7 +316,7 @@ describe("Pi extension-triggered runs", () => {
 
     // The extension has delivered its result and wakes Pi without sendPiTurn.
     frame({ type: "agent_start" });
-    expect(events).toEqual([{ type: "turn.activity", active: true }]);
+    expect(events).toContainEqual({ type: "turn.activity", active: true });
     await steerPiTurn({ ...input, text: "Keep going", attachments: [] });
     expect(mocks.request).toHaveBeenCalledWith(expect.objectContaining({ type: "steer" }));
     frame({ type: "agent_settled" });
