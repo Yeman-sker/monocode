@@ -1,0 +1,107 @@
+name: Personal macOS release
+
+on:
+  push:
+    branches: [personal]
+  workflow_dispatch:
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: personal-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'Yeman-sker/monocode'
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VITE_RELEASES_URL: https://github.com/Yeman-sker/monocode/releases/latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: personal
+          fetch-depth: 0
+
+      - name: Sync the latest upstream stable release
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          upstream=$(gh api repos/hardbeat920/monocode/releases/latest --jq .tag_name)
+          [[ "$upstream" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch https://github.com/hardbeat920/monocode.git "refs/tags/$upstream:refs/tags/$upstream"
+          git merge --no-edit "$upstream"
+          published=$(gh release view --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish 2>/dev/null || true)
+          if [[ "$GITHUB_EVENT_NAME" == schedule && "$published" == "$(git rev-parse HEAD)" ]]; then
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.sync.outputs.build == 'true'
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.sync.outputs.build == 'true'
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.sync.outputs.build == 'true'
+
+      - run: npm ci
+        if: steps.sync.outputs.build == 'true'
+
+      - name: Validate personal improvements and updater
+        if: steps.sync.outputs.build == 'true'
+        run: |
+          npx vitest run src/integrations/harness/providers/pi src/integrations/harness/providers/omp src/integrations/harness/core/apply.test.ts src/integrations/harness/core/child.test.ts src/app/hooks/useIdleSessionDetach.test.ts src/app/model/updater.test.ts src/app/model/updaterConfig.test.ts
+          npm run test:host
+          node --test scripts/personal-release.test.mjs
+          npx tsc --noEmit
+          cargo fmt --check
+          git diff --check
+
+      - name: Prepare personal version
+        if: steps.sync.outputs.build == 'true'
+        id: prepare
+        run: node scripts/personal-release.mjs prepare
+
+      - name: Build signed Apple Silicon updater
+        if: steps.sync.outputs.build == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: npx tauri build --target aarch64-apple-darwin --bundles app --config src-tauri/tauri.personal.build.json
+
+      - name: Verify package and create update feed
+        if: steps.sync.outputs.build == 'true'
+        run: |
+          codesign --verify --deep --strict target/aarch64-apple-darwin/release/bundle/macos/MonoCode.app
+          test "$(lipo -archs target/aarch64-apple-darwin/release/bundle/macos/MonoCode.app/Contents/MacOS/monocode)" = arm64
+          node scripts/personal-release.mjs manifest target/aarch64-apple-darwin/release/bundle/macos/MonoCode.app.tar.gz.sig
+
+      - name: Publish only a successful build
+        if: steps.sync.outputs.build == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.prepare.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:personal
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --target "$(git rev-parse HEAD)" --draft --title "MonoCode $RELEASE_VERSION" --notes "Latest upstream stable release with personal Pi background-session improvements. Apple Silicon build; updates stay on this fork."
+          fi
+          gh release upload "$RELEASE_TAG" target/aarch64-apple-darwin/release/bundle/macos/MonoCode.app.tar.gz target/aarch64-apple-darwin/release/bundle/macos/MonoCode.app.tar.gz.sig latest.json --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest

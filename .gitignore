@@ -58,3 +58,6 @@ Desktop.ini
 
 # Local document preview mockup
 /work/mono-document-preview.html
+
+# Generated personal release configuration
+/src-tauri/tauri.personal.build.json

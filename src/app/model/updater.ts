@@ -25,7 +25,7 @@ export type UpdaterSnapshot = {
 
 let pendingUpdate: Update | null = null;
 
-const RELEASES_URL = "https://github.com/hardbeat920/monocode/releases/latest";
+const RELEASES_URL = import.meta.env.VITE_RELEASES_URL || "https://github.com/hardbeat920/monocode/releases/latest";
 
 /**
  * Linux `.deb` and `.rpm` installs belong to apt/dnf. The release feed only
