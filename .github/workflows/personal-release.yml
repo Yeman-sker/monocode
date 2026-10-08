@@ -20,7 +20,6 @@ jobs:
     runs-on: macos-15
     env:
       GH_TOKEN: ${{ github.token }}
-      VITE_RELEASES_URL: https://github.com/Yeman-sker/monocode/releases/latest
     steps:
       - uses: actions/checkout@v4
         with:
