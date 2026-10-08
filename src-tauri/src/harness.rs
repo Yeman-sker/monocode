@@ -4038,6 +4038,7 @@ mod reap_logic_tests {
     }
 }
 
+/// Cache the bundled Pi extension atomically on the host that will execute it.
 #[tauri::command]
 pub fn harness_prepare_pi_bridge(app: AppHandle, source: String) -> Result<String, String> {
     use sha2::{Digest, Sha256};
@@ -4056,10 +4057,10 @@ pub fn harness_prepare_pi_bridge(app: AppHandle, source: String) -> Result<Strin
         std::fs::write(&temporary, &source).map_err(|e| e.to_string())?;
         let result = std::fs::rename(&temporary, &path);
         let _ = std::fs::remove_file(&temporary);
-        if result.is_err()
-            && std::fs::read_to_string(&path).ok().as_deref() != Some(source.as_str())
-        {
-            return Err(result.unwrap_err().to_string());
+        if let Err(error) = result {
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(source.as_str()) {
+                return Err(error.to_string());
+            }
         }
     }
     Ok(path.to_string_lossy().into_owned())

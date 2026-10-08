@@ -323,6 +323,7 @@ export async function rewindLastTurn(
   return { submitted: false };
 }
 
+/** Prompt a yielded Pi agent immediately; use steering while it is still running. */
 export async function steerTurn(
   flavor: PiFlavor,
   input: SteerTurnInput,
@@ -369,6 +370,7 @@ export function respondQuestion(
     ?.resolve(reply);
 }
 
+/** Abort the current run and release its Pi activity state. */
 export async function cancelTurn(
   flavor: PiFlavor,
   sessionId: string,
@@ -481,6 +483,7 @@ async function ensureLive(
   }
 }
 
+/** Start the RPC host, loading the background liveness bridge for Pi only. */
 async function startLive(
   flavor: PiFlavor,
   input: HarnessSessionInput,
@@ -610,6 +613,7 @@ async function startLive(
   }
 }
 
+/** Own one submit promise; leave cleanup to a newer run if it has taken over. */
 async function runTurn(
   flavor: PiFlavor,
   live: Live,
@@ -739,6 +743,7 @@ function interjectionFromCustomMessage(
   };
 }
 
+/** Translate RPC frames, including autonomous starts and keyed liveness statuses. */
 function handleFrame(
   flavor: PiFlavor,
   sessionId: string,
@@ -1032,7 +1037,7 @@ function handleFrame(
   }
 
   if (isAgentSettled(rec)) {
-    live.piSettled = true;
+    if (flavor.id === "pi") live.piSettled = true;
     if (flavor.id === "pi" && live.backgroundTasks.length) {
       live.onEvent({ type: "background.updated", tasks: live.backgroundTasks });
     }
@@ -1064,6 +1069,7 @@ function flushTurnError(flavor: PiFlavor, live: Live): void {
   });
 }
 
+/** Wait for Pi and background observers, ignoring stats from superseded runs. */
 async function settleTurn(live: Live, flavor: PiFlavor): Promise<void> {
   if (live.settling || live.cancelled || live.muteUpdates) return;
   if (flavor.id === "pi" && (!live.piSettled || live.backgroundTasks.length)) return;
@@ -1359,6 +1365,7 @@ function emitTaskListIfNeeded(live: Live, tool: InFlightTool): void {
   if (items) live.onEvent({ type: "tasks.updated", items });
 }
 
+/** Finish the current submit without carrying autonomous completion into the next prompt. */
 function finishActiveTurn(live: Live, extraEvents: HarnessEvent[] = []): void {
   if (!live.activeTurn && !live.turnDone) return;
   live.turnEndPending = false;
