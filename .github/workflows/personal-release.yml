@@ -64,10 +64,12 @@ jobs:
       - name: Validate personal improvements and updater
         if: steps.sync.outputs.build == 'true'
         run: |
-          npx vitest run src/integrations/harness/providers/pi src/integrations/harness/providers/omp src/integrations/harness/core/apply.test.ts src/integrations/harness/core/child.test.ts src/app/hooks/useIdleSessionDetach.test.ts src/app/model/updater.test.ts src/app/model/updaterConfig.test.ts
+          npx vitest run src/integrations/harness/providers/pi src/integrations/harness/providers/omp src/integrations/harness/core/apply.test.ts src/integrations/harness/core/child.test.ts src/app/hooks/useIdleSessionDetach.test.ts src/app/model/updater.test.ts src/app/model/updaterConfig.test.ts src/app/model/finalizeSubmittedTurn.test.ts src/app/model/harnessFlush.test.ts src/features/sessions/ui/BackgroundActivity.test.ts
           npm run test:host
           node --test scripts/personal-release.test.mjs
           npx tsc --noEmit
+          npx playwright install chromium webkit
+          npm run test:browser
           cargo fmt --check
           git diff --check
 
