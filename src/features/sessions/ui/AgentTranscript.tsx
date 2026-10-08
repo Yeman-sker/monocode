@@ -1392,6 +1392,7 @@ function AgentTranscriptComponent({
                 .concat(foldLineAt >= items.length ? [foldLineRow] : [])}
               {isLastTurn ? (
                 <BackgroundActivity
+                  key={turnId}
                   tasks={backgroundTasks}
                   busy={!settled}
                   visible={visible}
