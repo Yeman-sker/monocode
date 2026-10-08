@@ -17,6 +17,7 @@ const transport = vi.hoisted(() => ({
 }));
 
 vi.mock("../../core/child", () => ({
+  preparePiBackgroundBridge: async () => "/fake/bridge.mjs",
   resolveOmpBinary: async () => ({ path: "/fake/omp" }),
   resolvePiBinary: async () => ({ path: "/fake/pi" }),
   acquireHarnessBridge: async () => () => undefined,

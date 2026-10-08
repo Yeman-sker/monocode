@@ -446,6 +446,7 @@ pub fn run() {
             codex_mono_store::codex_mono_store_prepare,
             codex_mono_store::codex_mono_store_copy,
             codex_mono_store::codex_mono_store_restore_agent_state,
+            harness::harness_prepare_pi_bridge,
             harness::harness_write,
             harness::harness_kill,
             harness::harness_kill_all,
